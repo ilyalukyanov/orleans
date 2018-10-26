@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.WindowsAzure.Storage;
@@ -49,9 +50,9 @@ namespace Orleans.Transactions.AzureStorage
         /// <summary> Connection string for the Azure storage account used to host this table. </summary>
         protected string ConnectionString { get; set; }
 
-        private CloudTable tableReference;
+        private readonly ThreadLocal<CloudTable> tableReference;
 
-        public CloudTable Table => tableReference;
+        public CloudTable Table => tableReference.Value;
 
 #if !ORLEANS_TRANSACTIONS
         private readonly CounterStatistic numServerBusy = CounterStatistic.FindOrCreate(StatisticNames.AZURE_SERVER_BUSY, true);
@@ -68,6 +69,9 @@ namespace Orleans.Transactions.AzureStorage
             Logger = loggerFactory.CreateLogger<AzureTableDataManager<T>>();
             TableName = tableName;
             ConnectionString = storageConnectionString;
+
+            tableReference = new ThreadLocal<CloudTable>(() =>
+                GetCloudTableOperationsClient().GetTableReference(TableName));
 
             AzureStorageUtils.ValidateTableName(tableName);
         }
@@ -87,11 +91,7 @@ namespace Orleans.Transactions.AzureStorage
                 CloudTable tableRef = tableCreationClient.GetTableReference(TableName);
                 bool didCreate = await tableRef.CreateIfNotExistsAsync();
 
-
                 Logger.Info((int)Utilities.ErrorCode.AzureTable_01, "{0} Azure storage table {1}", (didCreate ? "Created" : "Attached to"), TableName);
-
-                CloudTableClient tableOperationsClient = GetCloudTableOperationsClient();
-                tableReference = tableOperationsClient.GetTableReference(TableName);
             }
             catch (Exception exc)
             {
@@ -171,7 +171,7 @@ namespace Orleans.Transactions.AzureStorage
                 try
                 {
                     // Presumably FromAsync(BeginExecute, EndExecute) has a slightly better performance then CreateIfNotExistsAsync.
-                    var opResult = await tableReference.ExecuteAsync(TableOperation.Insert(data));
+                    var opResult = await Table.ExecuteAsync(TableOperation.Insert(data));
 
 
                     return opResult.Etag;
@@ -207,7 +207,7 @@ namespace Orleans.Transactions.AzureStorage
                     // svc.AttachTo(TableName, data, null);
                     // svc.UpdateObject(data);
                     // SaveChangesOptions.ReplaceOnUpdate,
-                    var opResult = await tableReference.ExecuteAsync(TableOperation.InsertOrReplace(data));
+                    var opResult = await Table.ExecuteAsync(TableOperation.InsertOrReplace(data));
                     return opResult.Etag;
                 }
                 catch (Exception exc)
@@ -247,7 +247,7 @@ namespace Orleans.Transactions.AzureStorage
 
                     data.ETag = eTag;
                     // Merge requires an ETag (which may be the '*' wildcard).
-                    var opResult = await tableReference.ExecuteAsync(TableOperation.Merge(data));
+                    var opResult = await Table.ExecuteAsync(TableOperation.Merge(data));
                     return opResult.Etag;
                 }
                 catch (Exception exc)
@@ -281,7 +281,7 @@ namespace Orleans.Transactions.AzureStorage
                 try
                 {
                     data.ETag = dataEtag;
-                    var opResult = await tableReference.ExecuteAsync(TableOperation.Replace(data));
+                    var opResult = await Table.ExecuteAsync(TableOperation.Replace(data));
 
                     //The ETag of data is needed in further operations.
                     return opResult.Etag;
@@ -317,7 +317,7 @@ namespace Orleans.Transactions.AzureStorage
 
                 try
                 {
-                    await tableReference.ExecuteAsync(TableOperation.Delete(data));
+                    await Table.ExecuteAsync(TableOperation.Delete(data));
 
                 }
                 catch (Exception exc)
@@ -352,7 +352,7 @@ namespace Orleans.Transactions.AzureStorage
                 {
                     string queryString = TableQueryFilterBuilder.MatchPartitionKeyAndRowKeyFilter(partitionKey, rowKey);
                     var query = new TableQuery<T>().Where(queryString);
-                    TableQuerySegment<T> segment = await tableReference.ExecuteQuerySegmentedAsync(query, null);
+                    TableQuerySegment<T> segment = await Table.ExecuteQuerySegmentedAsync(query, null);
                     retrievedResult = segment.Results.SingleOrDefault();
                 }
                 catch (StorageException exception)
@@ -435,7 +435,7 @@ namespace Orleans.Transactions.AzureStorage
 
                 try
                 {
-                    await tableReference.ExecuteBatchAsync(entityBatch);
+                    await Table.ExecuteBatchAsync(entityBatch);
                 }
                 catch (Exception exc)
                 {
@@ -475,7 +475,7 @@ namespace Orleans.Transactions.AzureStorage
                         //ExecuteSegmentedAsync not supported in "WindowsAzure.Storage": "7.2.1" yet
                         while (querySegment == null || querySegment.ContinuationToken != null)
                         {
-                            querySegment = await tableReference.ExecuteQuerySegmentedAsync(cloudTableQuery, querySegment?.ContinuationToken);
+                            querySegment = await Table.ExecuteQuerySegmentedAsync(cloudTableQuery, querySegment?.ContinuationToken);
                             list.AddRange(querySegment);
                         }
 
@@ -558,7 +558,7 @@ namespace Orleans.Transactions.AzureStorage
                 try
                 {
                     // http://msdn.microsoft.com/en-us/library/hh452241.aspx
-                    await tableReference.ExecuteBatchAsync(entityBatch);
+                    await Table.ExecuteBatchAsync(entityBatch);
                 }
                 catch (Exception exc)
                 {
@@ -599,7 +599,7 @@ namespace Orleans.Transactions.AzureStorage
                     data2.ETag = data2Etag;
                     entityBatch.Add(TableOperation.Replace(data2));
 
-                    var opResults = await tableReference.ExecuteBatchAsync(entityBatch);
+                    var opResults = await Table.ExecuteBatchAsync(entityBatch);
 
                     //The batch results are returned in order of execution,
                     //see reference at https://msdn.microsoft.com/en-us/library/microsoft.windowsazure.storage.table.cloudtable.executebatch.aspx.
@@ -649,7 +649,7 @@ namespace Orleans.Transactions.AzureStorage
                         entityBatch.Add(TableOperation.Replace(data2));
                     }
 
-                    var opResults = await tableReference.ExecuteBatchAsync(entityBatch);
+                    var opResults = await Table.ExecuteBatchAsync(entityBatch);
 
 
                     //The batch results are returned in order of execution,
